@@ -1,7 +1,8 @@
 // quantize.cpp: GGUF requantizer for qwen
 // Reads BF16 GGUF, writes quantized GGUF with mixed-precision K-quant policy.
 // Policy mirrors llama-quantize: important tensors (v_proj, down_proj) get
-// bumped in S/M variants, embed_tokens always Q6_K, norms promoted to F32.
+// bumped in S/M variants, embed_tokens always Q8_0 (see is_embed: K-quants
+// have no CUDA get_rows kernel), norms promoted to F32.
 // Streaming write: one tensor at a time, low memory footprint for small configs.
 //
 // Usage: quantize <input.gguf> <output.gguf> <type>
@@ -42,15 +43,15 @@ struct QuantVariant {
 static const QuantVariant VARIANTS[] = {
     // name       base            bump            embed           mode  n
     { "BF16",   GGML_TYPE_BF16, GGML_TYPE_COUNT, GGML_TYPE_BF16, 0, 0 },
-    { "Q2_K",   GGML_TYPE_Q2_K, GGML_TYPE_Q4_K,  GGML_TYPE_Q6_K, 1, 4 },
-    { "Q3_K_S", GGML_TYPE_Q3_K, GGML_TYPE_COUNT, GGML_TYPE_Q6_K, 0, 0 },
-    { "Q3_K_M", GGML_TYPE_Q3_K, GGML_TYPE_Q5_K,  GGML_TYPE_Q6_K, 2, 0 },
-    { "Q3_K_L", GGML_TYPE_Q3_K, GGML_TYPE_Q5_K,  GGML_TYPE_Q6_K, 3, 0 },
-    { "Q4_K_S", GGML_TYPE_Q4_K, GGML_TYPE_Q5_K,  GGML_TYPE_Q6_K, 1, 4 },
-    { "Q4_K_M", GGML_TYPE_Q4_K, GGML_TYPE_Q6_K,  GGML_TYPE_Q6_K, 2, 0 },
-    { "Q5_K_S", GGML_TYPE_Q5_K, GGML_TYPE_COUNT, GGML_TYPE_Q6_K, 0, 0 },
-    { "Q5_K_M", GGML_TYPE_Q5_K, GGML_TYPE_Q6_K,  GGML_TYPE_Q6_K, 2, 0 },
-    { "Q6_K",   GGML_TYPE_Q6_K, GGML_TYPE_COUNT, GGML_TYPE_Q6_K, 0, 0 },
+    { "Q2_K",   GGML_TYPE_Q2_K, GGML_TYPE_Q4_K,  GGML_TYPE_Q8_0, 1, 4 },
+    { "Q3_K_S", GGML_TYPE_Q3_K, GGML_TYPE_COUNT, GGML_TYPE_Q8_0, 0, 0 },
+    { "Q3_K_M", GGML_TYPE_Q3_K, GGML_TYPE_Q5_K,  GGML_TYPE_Q8_0, 2, 0 },
+    { "Q3_K_L", GGML_TYPE_Q3_K, GGML_TYPE_Q5_K,  GGML_TYPE_Q8_0, 3, 0 },
+    { "Q4_K_S", GGML_TYPE_Q4_K, GGML_TYPE_Q5_K,  GGML_TYPE_Q8_0, 1, 4 },
+    { "Q4_K_M", GGML_TYPE_Q4_K, GGML_TYPE_Q6_K,  GGML_TYPE_Q8_0, 2, 0 },
+    { "Q5_K_S", GGML_TYPE_Q5_K, GGML_TYPE_COUNT, GGML_TYPE_Q8_0, 0, 0 },
+    { "Q5_K_M", GGML_TYPE_Q5_K, GGML_TYPE_Q6_K,  GGML_TYPE_Q8_0, 2, 0 },
+    { "Q6_K",   GGML_TYPE_Q6_K, GGML_TYPE_COUNT, GGML_TYPE_Q8_0, 0, 0 },
     { "Q8_0",   GGML_TYPE_Q8_0, GGML_TYPE_COUNT, GGML_TYPE_Q8_0, 0, 0 },
 };
 
