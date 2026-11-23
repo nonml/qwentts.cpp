@@ -63,6 +63,7 @@ struct tts_request {
     int     subtalker_top_k;        // 0 disables the top-k filter
     float   subtalker_temperature;  // 0 selects greedy decoding
     float   subtalker_top_p;        // in (0, 1]
+    int     eos_guard_frames;       // >= 0, see qt_tts_params.eos_guard_frames
 };
 
 // One voice registration parsed from the POST /v1/audio/voices JSON body.
@@ -212,6 +213,7 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
     req.subtalker_top_k       = -1;
     req.subtalker_temperature = NAN;
     req.subtalker_top_p       = NAN;
+    req.eos_guard_frames      = -1;
 
     auto opt_int = [&](const char * key, int64_t lo, int64_t hi, int64_t & out) -> bool {
         yyjson_val * v = yyjson_obj_get(root, key);
@@ -241,16 +243,19 @@ static bool tts_parse_request(const std::string & body, tts_request & req, std::
     int64_t max_new   = -1;
     int64_t top_k     = -1;
     int64_t sub_top_k = -1;
+    int64_t eos_guard = -1;
     bool    ok = opt_int("seed", INT64_MIN, INT64_MAX, req.seed) && opt_int("max_new_tokens", 1, INT32_MAX, max_new) &&
               opt_int("top_k", 0, INT32_MAX, top_k) && opt_num("temperature", 0.0, FLT_MAX, req.temperature) &&
               opt_num("top_p", DBL_MIN, 1.0, req.top_p) &&
               opt_num("repetition_penalty", DBL_MIN, FLT_MAX, req.repetition_penalty) &&
               opt_int("subtalker_top_k", 0, INT32_MAX, sub_top_k) &&
               opt_num("subtalker_temperature", 0.0, FLT_MAX, req.subtalker_temperature) &&
-              opt_num("subtalker_top_p", DBL_MIN, 1.0, req.subtalker_top_p);
+              opt_num("subtalker_top_p", DBL_MIN, 1.0, req.subtalker_top_p) &&
+              opt_int("eos_guard_frames", 0, 64, eos_guard);
     req.max_new_tokens  = (int) max_new;
     req.top_k           = (int) top_k;
-    req.subtalker_top_k = (int) sub_top_k;
+    req.subtalker_top_k  = (int) sub_top_k;
+    req.eos_guard_frames = (int) eos_guard;
 
     yyjson_doc_free(doc);
 

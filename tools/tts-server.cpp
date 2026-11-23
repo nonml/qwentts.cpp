@@ -298,6 +298,9 @@ int main(int argc, char ** argv) {
         if (!std::isnan(req.repetition_penalty)) {
             p.repetition_penalty = req.repetition_penalty;
         }
+        if (req.eos_guard_frames >= 0) {
+            p.eos_guard_frames = req.eos_guard_frames;
+        }
 
         // Trampoline : the C ABI on_chunk forwards to the C++ sink.
         const tts_sink * sink_ptr = &sink;

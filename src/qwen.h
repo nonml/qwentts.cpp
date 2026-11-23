@@ -349,6 +349,14 @@ struct qt_tts_params {
     int             ref_spk_dim;
     const int32_t * ref_codes;
     int             ref_T;
+
+    // Mid-sound stop guard. 0 (the default) keeps the upstream sampling.
+    // N > 0: an EOS sampled while the last generated frame still sounds
+    // (within 20 dB of the take's speech level, measured on a
+    // one-shot decode of the last frames) is refused and c0 is drawn
+    // again without it, at most N times per take. A sampled EOS can
+    // otherwise land mid-syllable and cut the last word short.
+    int eos_guard_frames;
 };
 
 // Initialise to the standard defaults. Strings NULL, seed -1, sampling

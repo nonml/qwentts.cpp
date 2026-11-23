@@ -19,6 +19,8 @@
 #include "talker-forward.h"
 #include "timer.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -516,6 +518,7 @@ struct TtsSlot {
     std::vector<float>   logits;          // pending c0 logits [vocab]
     int                  pending_c0;      // c0 of the frame in flight
     bool                 has_frame;       // slot emits a frame this engine step
+    int                  eos_refused;     // EOS draws the mid-sound guard refused
 
     // Streaming state: the slot's codec stream lane, an index into the
     // compacted [0, codec_M) span of the shared multi set codec state.
@@ -821,6 +824,7 @@ bool tts_engine_admit(TtsEngine * e, TtsJob * job) {
     s.prev_overlay     = NULL;
     s.pending_c0       = -1;
     s.has_frame        = false;
+    s.eos_refused      = 0;
     s.streaming        = (params->on_chunk != NULL);
     s.codec_set        = -1;
     s.finished         = false;
@@ -1061,6 +1065,46 @@ static void tts_slot_complete(TtsEngine * e, TtsSlot & s) {
     job->status = st;
 }
 
+// The mid-sound stop guard's test (qt_tts_params.eos_guard_frames):
+// whether the last generated frame still sounds. The last
+// EOS_GUARD_WINDOW frames are decoded one shot (no streaming codec state
+// is touched) and the last frame's level is compared with the loudest
+// quarter of the rest.
+static const int   EOS_GUARD_WINDOW = 16;
+static const float EOS_GUARD_DB     = 20.0f;
+
+static bool last_frame_sounds(PipelineTTS * pt, const std::vector<std::vector<int32_t>> & codes, int K) {
+    const int T = (int) codes.size();
+    if (T < 2) {
+        return false;
+    }
+    const int            n = T < EOS_GUARD_WINDOW ? T : EOS_GUARD_WINDOW;
+    std::vector<int32_t> slice((size_t) K * (size_t) n);
+    for (int t = 0; t < n; t++) {
+        for (int k = 0; k < K; k++) {
+            slice[(size_t) k * (size_t) n + (size_t) t] = codes[(size_t) (T - n + t)][(size_t) k];
+        }
+    }
+    std::vector<float> wav = pipeline_codec_decode(&pt->codec, slice.data(), K, n);
+    const size_t       hop = (size_t) TOKENIZER_HOP_LENGTH;
+    if (wav.size() < (size_t) n * hop) {
+        return false;
+    }
+    std::vector<float> db((size_t) n);
+    for (int t = 0; t < n; t++) {
+        double sum = 0.0;
+        for (size_t i = 0; i < hop; i++) {
+            const float v = wav[(size_t) t * hop + i];
+            sum += (double) v * (double) v;
+        }
+        db[(size_t) t] = 10.0f * log10f((float) (sum / (double) hop) + 1e-12f);
+    }
+    std::vector<float> rest(db.begin(), db.end() - 1);
+    std::sort(rest.begin(), rest.end());
+    const float speech = rest[(rest.size() * 3) / 4];
+    return db[(size_t) n - 1] > speech - EOS_GUARD_DB;
+}
+
 void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
     PipelineTTS * pt = e->pt;
     const int     N  = (int) e->slots.size();
@@ -1155,10 +1199,27 @@ void tts_engine_step(TtsEngine * e, std::vector<TtsJob *> * retired) {
         // codec_eos. Then run the upstream sampling chain.
         Timer t_host;
         apply_suppress(s.logits.data(), vocab, vocab - 1024, vocab, codec_eos_id);
+        // Mid-sound stop guard: the logits kept, so c0 can be drawn again.
+        const bool         guarding = s.eos_refused < p->eos_guard_frames;
+        std::vector<float> kept;
+        if (guarding) {
+            kept = s.logits;
+        }
         float u_c0 = 0.0f;
         int   c0   = sample_top_k_p(s.logits.data(), vocab, p->temperature, p->top_k, p->top_p, p->repetition_penalty,
                                     s.talker_history.data(), (int) s.talker_history.size(), s.job->resolved_seed,
                                     s.subseq_counter, &u_c0);
+        // An EOS while the last frame still sounds cuts the word short:
+        // refused, and c0 drawn again from the same logits without EOS.
+        if (c0 == codec_eos_id && guarding && last_frame_sounds(pt, s.all_codes, num_codebooks)) {
+            s.eos_refused++;
+            kept[(size_t) codec_eos_id] = -INFINITY;
+            c0 = sample_top_k_p(kept.data(), vocab, p->temperature, p->top_k, p->top_p, p->repetition_penalty,
+                                s.talker_history.data(), (int) s.talker_history.size(), s.job->resolved_seed,
+                                s.subseq_counter, &u_c0);
+            qt_log(QT_LOG_INFO, "[Pipeline] EOS at step %d refused mid-sound (slot %d, %d of %d)", s.step, i,
+                   s.eos_refused, p->eos_guard_frames);
+        }
         s.perf.host_ms += t_host.ms();
         s.subseq_counter++;
         if (c0 < 0) {
